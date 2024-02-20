@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/resourceids"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/table/tables"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/table/tables"
 )
 
 // TODO: tests for this
@@ -42,8 +42,8 @@ func NewStorageTableDataPlaneId(accountName, domainSuffix, name string) StorageT
 	}
 }
 
-func StorageTableDataPlaneID(input string) (*StorageTableDataPlaneId, error) {
-	parsed, err := tables.ParseResourceID(input)
+func StorageTableDataPlaneID(input, domainSuffix string) (*StorageTableDataPlaneId, error) {
+	parsed, err := tables.ParseTableID(input, domainSuffix)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func StorageTableDataPlaneID(input string) (*StorageTableDataPlaneId, error) {
 	domainNameSuffix := strings.TrimPrefix(host, fmt.Sprintf("%s.table.", hostSegments[0]))
 
 	return &StorageTableDataPlaneId{
-		AccountName:  parsed.AccountName,
+		AccountName:  parsed.AccountId.AccountName,
 		DomainSuffix: domainNameSuffix,
 		Name:         parsed.TableName,
 	}, nil

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/resourceids"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/file/shares"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/file/shares"
 )
 
 // TODO: tests for this
@@ -42,8 +42,8 @@ func NewStorageShareDataPlaneId(accountName, domainSuffix, name string) StorageS
 	}
 }
 
-func StorageShareDataPlaneID(id string) (*StorageShareDataPlaneId, error) {
-	parsed, err := shares.ParseResourceID(id)
+func StorageShareDataPlaneID(id, domainSuffix string) (*StorageShareDataPlaneId, error) {
+	parsed, err := shares.ParseShareID(id, domainSuffix)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func StorageShareDataPlaneID(id string) (*StorageShareDataPlaneId, error) {
 	domainNameSuffix := strings.TrimPrefix(host, fmt.Sprintf("%s.file.", hostSegments[0]))
 
 	return &StorageShareDataPlaneId{
-		AccountName:  parsed.AccountName,
+		AccountName:  parsed.AccountId.AccountName,
 		DomainSuffix: domainNameSuffix,
 		Name:         parsed.ShareName,
 	}, nil

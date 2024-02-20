@@ -103,7 +103,7 @@ func (r storageContainersDataSource) Read() sdk.ResourceFunc {
 				return fmt.Errorf("retrieving %s: %+v", id, err)
 			}
 
-			plan.Containers = flattenStorageContainersContainers(resp.Items, id.StorageAccountName, metadata.Client.Storage.Environment.StorageEndpointSuffix, plan.NamePrefix)
+			plan.Containers = flattenStorageContainersContainers(resp.Items, id.StorageAccountName, metadata.Client.Storage.AzureEnvironment.StorageEndpointSuffix, plan.NamePrefix)
 
 			if err := metadata.Encode(&plan); err != nil {
 				return fmt.Errorf("encoding %s: %+v", id, err)

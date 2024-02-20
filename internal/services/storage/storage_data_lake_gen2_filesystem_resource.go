@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/hashicorp/go-azure-helpers/lang/response"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/tf"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/clients"
@@ -18,8 +19,9 @@ import (
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/validation"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/timeouts"
 	"github.com/hashicorp/terraform-provider-azurerm/utils"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/datalakestore/filesystems"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/datalakestore/paths"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/blob/accounts"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/datalakestore/filesystems"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/datalakestore/paths"
 	"github.com/tombuildsstuff/giovanni/storage/accesscontrol"
 )
 
@@ -31,22 +33,22 @@ func resourceStorageDataLakeGen2FileSystem() *pluginsdk.Resource {
 		Delete: resourceStorageDataLakeGen2FileSystemDelete,
 
 		Importer: pluginsdk.ImporterValidatingResourceIdThen(func(id string) error {
-			_, err := filesystems.ParseResourceID(id)
+			_, err := filesystems.ParseFileSystemID(id, "") // TODO: actual domain suffix needed here!
 			return err
 		}, func(ctx context.Context, d *pluginsdk.ResourceData, meta interface{}) ([]*pluginsdk.ResourceData, error) {
 			storageClients := meta.(*clients.Client).Storage
-			id, err := filesystems.ParseResourceID(d.Id())
+			id, err := filesystems.ParseFileSystemID(d.Id(), "") // TODO: actual domain suffix needed here!
 			if err != nil {
 				return []*pluginsdk.ResourceData{d}, fmt.Errorf("parsing ID %q for import of Data Lake Gen2 File System: %v", d.Id(), err)
 			}
 
 			// we then need to look up the Storage Account ID
-			account, err := storageClients.FindAccount(ctx, id.AccountName)
+			account, err := storageClients.FindAccount(ctx, id.AccountId.AccountName)
 			if err != nil {
-				return []*pluginsdk.ResourceData{d}, fmt.Errorf("retrieving Account %q for Data Lake Gen2 File System %q: %s", id.AccountName, id.DirectoryName, err)
+				return []*pluginsdk.ResourceData{d}, fmt.Errorf("retrieving Account %q for Data Lake Gen2 File System %q: %s", id.AccountId.AccountName, id.FileSystemName, err)
 			}
 			if account == nil {
-				return []*pluginsdk.ResourceData{d}, fmt.Errorf("Unable to locate Storage Account %q!", id.AccountName)
+				return []*pluginsdk.ResourceData{d}, fmt.Errorf("Unable to locate Storage Account %q!", id.AccountId.AccountName)
 			}
 
 			d.Set("storage_account_id", account.ID)
@@ -127,31 +129,32 @@ func resourceStorageDataLakeGen2FileSystem() *pluginsdk.Resource {
 }
 
 func resourceStorageDataLakeGen2FileSystemCreate(d *pluginsdk.ResourceData, meta interface{}) error {
-	accountsClient := meta.(*clients.Client).Storage.AccountsClient
-	client := meta.(*clients.Client).Storage.FileSystemsClient
-	pathClient := meta.(*clients.Client).Storage.ADLSGen2PathsClient
+	storageClient := meta.(*clients.Client).Storage
+	accountsClient := storageClient.AccountsClient
+	client := storageClient.FileSystemsClient
+	pathClient := storageClient.ADLSGen2PathsClient
 	ctx, cancel := timeouts.ForCreate(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	storageID, err := commonids.ParseStorageAccountID(d.Get("storage_account_id").(string))
+	storageId, err := commonids.ParseStorageAccountID(d.Get("storage_account_id").(string))
 	if err != nil {
 		return err
+	}
+
+	// confirm the storage account exists, otherwise Data Plane API requests will fail
+	storageAccount, err := accountsClient.GetProperties(ctx, storageId.ResourceGroupName, storageId.StorageAccountName, "")
+	if err != nil {
+		if utils.ResponseWasNotFound(storageAccount.Response) {
+			return fmt.Errorf("%s was not found", storageId)
+		}
+
+		return fmt.Errorf("checking for existence of %s: %v", storageId, err)
 	}
 
 	aceRaw := d.Get("ace").(*pluginsdk.Set).List()
 	acl, err := ExpandDataLakeGen2AceList(aceRaw)
 	if err != nil {
-		return fmt.Errorf("parsing ace list: %s", err)
-	}
-
-	// confirm the storage account exists, otherwise Data Plane API requests will fail
-	storageAccount, err := accountsClient.GetProperties(ctx, storageID.ResourceGroupName, storageID.StorageAccountName, "")
-	if err != nil {
-		if utils.ResponseWasNotFound(storageAccount.Response) {
-			return fmt.Errorf("%s was not found", storageID)
-		}
-
-		return fmt.Errorf("checking for existence of %s: %+v", storageID, err)
+		return fmt.Errorf("parsing ace list: %v", err)
 	}
 
 	if acl != nil && (storageAccount.AccountProperties == nil ||
@@ -164,25 +167,30 @@ func resourceStorageDataLakeGen2FileSystemCreate(d *pluginsdk.ResourceData, meta
 	propertiesRaw := d.Get("properties").(map[string]interface{})
 	properties := ExpandMetaData(propertiesRaw)
 
-	id := client.GetResourceID(storageID.StorageAccountName, fileSystemName)
-
-	resp, err := client.GetProperties(ctx, storageID.StorageAccountName, fileSystemName)
+	accountId, err := accounts.ParseAccountID(d.Get("storage_account_id").(string), storageClient.StorageDomainSuffix)
 	if err != nil {
-		if !utils.ResponseWasNotFound(resp.Response) {
-			return fmt.Errorf("checking for existence of existing File System %q in %s: %+v", fileSystemName, storageID, err)
+		return fmt.Errorf("parsing Account ID: %v", err)
+	}
+
+	id := filesystems.NewFileSystemID(*accountId, fileSystemName)
+
+	resp, err := client.GetProperties(ctx, fileSystemName)
+	if err != nil {
+		if !response.WasNotFound(resp.HttpResponse) {
+			return fmt.Errorf("checking for existence of existing File System %q in %s: %v", fileSystemName, accountId, err)
 		}
 	}
 
-	if !utils.ResponseWasNotFound(resp.Response) {
-		return tf.ImportAsExistsError("azurerm_storage_data_lake_gen2_filesystem", id)
+	if !response.WasNotFound(resp.HttpResponse) {
+		return tf.ImportAsExistsError("azurerm_storage_data_lake_gen2_filesystem", id.ID())
 	}
 
-	log.Printf("[INFO] Creating File System %q in %s.", fileSystemName, storageID)
+	log.Printf("[INFO] Creating %s...", id)
 	input := filesystems.CreateInput{
 		Properties: properties,
 	}
-	if _, err := client.Create(ctx, storageID.StorageAccountName, fileSystemName, input); err != nil {
-		return fmt.Errorf("creating File System %q in %s: %+v", fileSystemName, storageID, err)
+	if _, err = client.Create(ctx, fileSystemName, input); err != nil {
+		return fmt.Errorf("creating %s: %v", id, err)
 	}
 
 	var owner *string
@@ -199,7 +207,7 @@ func resourceStorageDataLakeGen2FileSystemCreate(d *pluginsdk.ResourceData, meta
 	if acl != nil || owner != nil || group != nil {
 		var aclString *string
 		if acl != nil {
-			log.Printf("[INFO] Creating acl %q in File System %q in %s", acl, fileSystemName, storageID)
+			log.Printf("[INFO] Creating ACL %q for %s", acl, id)
 			v := acl.String()
 			aclString = &v
 		}
@@ -208,23 +216,24 @@ func resourceStorageDataLakeGen2FileSystemCreate(d *pluginsdk.ResourceData, meta
 			Owner: owner,
 			Group: group,
 		}
-		if _, err := pathClient.SetAccessControl(ctx, storageID.StorageAccountName, fileSystemName, "/", accessControlInput); err != nil {
-			return fmt.Errorf("setting access control for root path in File System %q in %s: %+v", fileSystemName, storageID, err)
+		if _, err = pathClient.SetAccessControl(ctx, fileSystemName, "/", accessControlInput); err != nil {
+			return fmt.Errorf("setting access control for root path in File System %q in %s: %v", fileSystemName, accountId, err)
 		}
 	}
 
-	d.SetId(id)
+	d.SetId(id.ID())
 	return resourceStorageDataLakeGen2FileSystemRead(d, meta)
 }
 
 func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta interface{}) error {
-	accountsClient := meta.(*clients.Client).Storage.AccountsClient
-	client := meta.(*clients.Client).Storage.FileSystemsClient
-	pathClient := meta.(*clients.Client).Storage.ADLSGen2PathsClient
+	storageClient := meta.(*clients.Client).Storage
+	accountsClient := storageClient.AccountsClient
+	client := storageClient.FileSystemsClient
+	pathClient := storageClient.ADLSGen2PathsClient
 	ctx, cancel := timeouts.ForUpdate(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	id, err := filesystems.ParseResourceID(d.Id())
+	id, err := filesystems.ParseFileSystemID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
@@ -237,7 +246,7 @@ func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta
 	aceRaw := d.Get("ace").(*pluginsdk.Set).List()
 	acl, err := ExpandDataLakeGen2AceList(aceRaw)
 	if err != nil {
-		return fmt.Errorf("parsing ace list: %s", err)
+		return fmt.Errorf("parsing ace list: %v", err)
 	}
 
 	// confirm the storage account exists, otherwise Data Plane API requests will fail
@@ -247,7 +256,7 @@ func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta
 			return fmt.Errorf("%s was not found", storageId)
 		}
 
-		return fmt.Errorf("checking for existence of %s: %+v", storageId, err)
+		return fmt.Errorf("checking for existence of %s: %v", storageId, err)
 	}
 
 	if acl != nil && (storageAccount.AccountProperties == nil ||
@@ -259,12 +268,12 @@ func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta
 	propertiesRaw := d.Get("properties").(map[string]interface{})
 	properties := ExpandMetaData(propertiesRaw)
 
-	log.Printf("[INFO] Updating Properties for File System %q in Storage Account %q.", id.DirectoryName, id.AccountName)
+	log.Printf("[INFO] Updating Properties for %s...", id)
 	input := filesystems.SetPropertiesInput{
 		Properties: properties,
 	}
-	if _, err = client.SetProperties(ctx, id.AccountName, id.DirectoryName, input); err != nil {
-		return fmt.Errorf("updating Properties for File System %q in Storage Account %q: %s", id.DirectoryName, id.AccountName, err)
+	if _, err = client.SetProperties(ctx, id.FileSystemName, input); err != nil {
+		return fmt.Errorf("updating Properties for %s: %v", id, err)
 	}
 
 	var owner *string
@@ -281,7 +290,7 @@ func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta
 	if acl != nil || owner != nil || group != nil {
 		var aclString *string
 		if acl != nil {
-			log.Printf("[INFO] Creating acl %q in File System %q in Storage Account %q.", acl, id.DirectoryName, id.AccountName)
+			log.Printf("[INFO] Creating ACL %q for %s...", acl, id)
 			v := acl.String()
 			aclString = &v
 		}
@@ -290,8 +299,8 @@ func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta
 			Owner: owner,
 			Group: group,
 		}
-		if _, err := pathClient.SetAccessControl(ctx, id.AccountName, id.DirectoryName, "/", accessControlInput); err != nil {
-			return fmt.Errorf("setting access control for root path in File System %q in Storage Account %q: %s", id.DirectoryName, id.AccountName, err)
+		if _, err = pathClient.SetAccessControl(ctx, id.FileSystemName, "/", accessControlInput); err != nil {
+			return fmt.Errorf("setting access control for root path in File System %q in Storage Account %q: %v", id.FileSystemName, id.AccountId.AccountName, err)
 		}
 	}
 
@@ -299,49 +308,50 @@ func resourceStorageDataLakeGen2FileSystemUpdate(d *pluginsdk.ResourceData, meta
 }
 
 func resourceStorageDataLakeGen2FileSystemRead(d *pluginsdk.ResourceData, meta interface{}) error {
-	accountsClient := meta.(*clients.Client).Storage.AccountsClient
-	client := meta.(*clients.Client).Storage.FileSystemsClient
-	pathClient := meta.(*clients.Client).Storage.ADLSGen2PathsClient
+	storageClient := meta.(*clients.Client).Storage
+	accountsClient := storageClient.AccountsClient
+	client := storageClient.FileSystemsClient
+	pathClient := storageClient.ADLSGen2PathsClient
 	ctx, cancel := timeouts.ForRead(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	id, err := filesystems.ParseResourceID(d.Id())
+	id, err := filesystems.ParseFileSystemID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
-	storageID, err := commonids.ParseStorageAccountID(d.Get("storage_account_id").(string))
+	storageId, err := commonids.ParseStorageAccountID(d.Get("storage_account_id").(string))
 	if err != nil {
 		return err
 	}
 
 	// confirm the storage account exists, otherwise Data Plane API requests will fail
-	storageAccount, err := accountsClient.GetProperties(ctx, storageID.ResourceGroupName, storageID.StorageAccountName, "")
+	storageAccount, err := accountsClient.GetProperties(ctx, storageId.ResourceGroupName, storageId.StorageAccountName, "")
 	if err != nil {
 		if utils.ResponseWasNotFound(storageAccount.Response) {
-			log.Printf("[INFO] Storage Account %q does not exist removing from state...", id.AccountName)
+			log.Printf("[INFO] Storage Account %q does not exist removing from state...", id.AccountId.AccountName)
 			d.SetId("")
 			return nil
 		}
 
-		return fmt.Errorf("checking for existence of %s for File System %q: %+v", storageID, id.DirectoryName, err)
+		return fmt.Errorf("checking for existence of %s for File System %q: %+v", storageId, id.FileSystemName, err)
 	}
 
-	resp, err := client.GetProperties(ctx, id.AccountName, id.DirectoryName)
+	resp, err := client.GetProperties(ctx, id.FileSystemName)
 	if err != nil {
-		if utils.ResponseWasNotFound(resp.Response) {
-			log.Printf("[INFO] File System %q does not exist in Storage Account %q - removing from state...", id.DirectoryName, id.AccountName)
+		if response.WasNotFound(resp.HttpResponse) {
+			log.Printf("[INFO] File System %q does not exist in Storage Account %q - removing from state...", id.FileSystemName, id.AccountId.AccountName)
 			d.SetId("")
 			return nil
 		}
 
-		return fmt.Errorf("retrieving File System %q in Storage Account %q: %+v", id.DirectoryName, id.AccountName, err)
+		return fmt.Errorf("retrieving %s: %v", id, err)
 	}
 
-	d.Set("name", id.DirectoryName)
+	d.Set("name", id.FileSystemName)
 
-	if err := d.Set("properties", resp.Properties); err != nil {
-		return fmt.Errorf("setting `properties`: %+v", err)
+	if err = d.Set("properties", resp.Properties); err != nil {
+		return fmt.Errorf("setting `properties`: %v", err)
 	}
 
 	var ace []interface{}
@@ -351,7 +361,7 @@ func resourceStorageDataLakeGen2FileSystemRead(d *pluginsdk.ResourceData, meta i
 		*storageAccount.AccountProperties.IsHnsEnabled {
 		// The above `getStatus` API request doesn't return the ACLs
 		// Have to make a `getAccessControl` request, but that doesn't return all fields either!
-		pathResponse, err := pathClient.GetProperties(ctx, id.AccountName, id.DirectoryName, "/", paths.GetPropertiesActionGetAccessControl)
+		pathResponse, err := pathClient.GetProperties(ctx, id.FileSystemName, "/", paths.GetPropertiesInput{Action: paths.GetPropertiesActionGetAccessControl})
 		if err == nil {
 			acl, err := accesscontrol.ParseACL(pathResponse.ACL)
 			if err != nil {
@@ -370,19 +380,20 @@ func resourceStorageDataLakeGen2FileSystemRead(d *pluginsdk.ResourceData, meta i
 }
 
 func resourceStorageDataLakeGen2FileSystemDelete(d *pluginsdk.ResourceData, meta interface{}) error {
-	client := meta.(*clients.Client).Storage.FileSystemsClient
+	storageClient := meta.(*clients.Client).Storage
+	client := storageClient.FileSystemsClient
 	ctx, cancel := timeouts.ForDelete(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	id, err := filesystems.ParseResourceID(d.Id())
+	id, err := filesystems.ParseFileSystemID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
-	resp, err := client.Delete(ctx, id.AccountName, id.DirectoryName)
+	resp, err := client.Delete(ctx, id.FileSystemName)
 	if err != nil {
-		if !utils.ResponseWasNotFound(resp) {
-			return fmt.Errorf("deleting File System %q in Storage Account %q: %+v", id.DirectoryName, id.AccountName, err)
+		if !response.WasNotFound(resp.HttpResponse) {
+			return fmt.Errorf("deleting %s: %v", id, err)
 		}
 	}
 

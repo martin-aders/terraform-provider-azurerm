@@ -42,11 +42,11 @@ func (ad *accountDetails) AccountKey(ctx context.Context, client Client) (*strin
 	log.Printf("[DEBUG] Cache Miss - looking up the account key for storage account %q..", ad.name)
 	props, err := client.AccountsClient.ListKeys(ctx, ad.ResourceGroup, ad.name, storage.ListKeyExpandKerb)
 	if err != nil {
-		return nil, fmt.Errorf("Listing Keys for Storage Account %q (Resource Group %q): %+v", ad.name, ad.ResourceGroup, err)
+		return nil, fmt.Errorf("listing Keys for Storage Account %q (Resource Group %q): %+v", ad.name, ad.ResourceGroup, err)
 	}
 
 	if props.Keys == nil || len(*props.Keys) == 0 || (*props.Keys)[0].Value == nil {
-		return nil, fmt.Errorf("Keys were nil for Storage Account %q (Resource Group %q): %+v", ad.name, ad.ResourceGroup, err)
+		return nil, fmt.Errorf("keys were nil for Storage Account %q (Resource Group %q): %+v", ad.name, ad.ResourceGroup, err)
 	}
 
 	keys := *props.Keys

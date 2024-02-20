@@ -10,13 +10,14 @@ import (
 
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/tf"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/clients"
+	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/helpers"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/migration"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/parse"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/validate"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/pluginsdk"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/validation"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/timeouts"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/table/tables"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/table/tables"
 )
 
 func resourceStorageTable() *pluginsdk.Resource {
@@ -26,8 +27,8 @@ func resourceStorageTable() *pluginsdk.Resource {
 		Delete: resourceStorageTableDelete,
 		Update: resourceStorageTableUpdate,
 
-		Importer: pluginsdk.ImporterValidatingResourceId(func(id string) error {
-			_, err := parse.StorageTableDataPlaneID(id)
+		Importer: helpers.ImporterValidatingStorageResourceId(func(id, storageDomainSuffix string) error {
+			_, err := parse.StorageTableDataPlaneID(id, storageDomainSuffix)
 			return err
 		}),
 
@@ -114,32 +115,32 @@ func resourceStorageTableCreate(d *pluginsdk.ResourceData, meta interface{}) err
 		return fmt.Errorf("retrieving Account %q for Table %q: %s", accountName, tableName, err)
 	}
 	if account == nil {
-		return fmt.Errorf("unable to locate Storage Account %q!", accountName)
+		return fmt.Errorf("locating Storage Account %q", accountName)
 	}
 
-	client, err := storageClient.TablesClient(ctx, *account)
+	client, err := storageClient.TablesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
 		return fmt.Errorf("building Table Client: %s", err)
 	}
 
-	id := parse.NewStorageTableDataPlaneId(accountName, storageClient.Environment.StorageEndpointSuffix, tableName).ID()
+	id := parse.NewStorageTableDataPlaneId(accountName, storageClient.AzureEnvironment.StorageEndpointSuffix, tableName)
 
-	exists, err := client.Exists(ctx, account.ResourceGroup, accountName, tableName)
+	exists, err := client.Exists(ctx, tableName)
 	if err != nil {
-		return fmt.Errorf("checking for existence of existing Storage Table %q (Account %q / Resource Group %q): %+v", tableName, accountName, account.ResourceGroup, err)
+		return fmt.Errorf("checking for existing %s: %v", id, err)
 	}
 	if exists != nil && *exists {
-		return tf.ImportAsExistsError("azurerm_storage_table", id)
+		return tf.ImportAsExistsError("azurerm_storage_table", id.ID())
 	}
 
-	log.Printf("[DEBUG] Creating Table %q in Storage Account %q.", tableName, accountName)
-	if err := client.Create(ctx, account.ResourceGroup, accountName, tableName); err != nil {
-		return fmt.Errorf("creating Table %q within Storage Account %q: %s", tableName, accountName, err)
+	if err = client.Create(ctx, tableName); err != nil {
+		return fmt.Errorf("creating %s: %v", id, err)
 	}
 
-	d.SetId(id)
-	if err := client.UpdateACLs(ctx, account.ResourceGroup, accountName, tableName, acls); err != nil {
-		return fmt.Errorf("setting ACL's for Storage Table %q (Account %q / Resource Group %q): %+v", tableName, accountName, account.ResourceGroup, err)
+	d.SetId(id.ID())
+
+	if err = client.UpdateACLs(ctx, tableName, acls); err != nil {
+		return fmt.Errorf("setting ACLs for %s: %v", id, err)
 	}
 
 	return resourceStorageTableRead(d, meta)
@@ -150,14 +151,14 @@ func resourceStorageTableRead(d *pluginsdk.ResourceData, meta interface{}) error
 	ctx, cancel := timeouts.ForRead(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	id, err := parse.StorageTableDataPlaneID(d.Id())
+	id, err := parse.StorageTableDataPlaneID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
 	account, err := storageClient.FindAccount(ctx, id.AccountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Table %q: %s", id.AccountName, id.Name, err)
+		return fmt.Errorf("retrieving Storage Account %q for Table %q: %v", id.AccountName, id.Name, err)
 	}
 	if account == nil {
 		log.Printf("Unable to determine Resource Group for Storage Storage Table %q (Account %s) - assuming removed & removing from state", id.Name, id.AccountName)
@@ -165,31 +166,31 @@ func resourceStorageTableRead(d *pluginsdk.ResourceData, meta interface{}) error
 		return nil
 	}
 
-	client, err := storageClient.TablesClient(ctx, *account)
+	client, err := storageClient.TablesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
-		return fmt.Errorf("building Table Client: %s", err)
+		return fmt.Errorf("building Tables Client: %v", err)
 	}
 
-	exists, err := client.Exists(ctx, account.ResourceGroup, id.AccountName, id.Name)
+	exists, err := client.Exists(ctx, id.Name)
 	if err != nil {
-		return fmt.Errorf("retrieving Table %q (Storage Account %q / Resource Group %q): %s", id.Name, id.AccountName, account.ResourceGroup, err)
+		return fmt.Errorf("retrieving %s: %v", id, err)
 	}
 	if exists == nil || !*exists {
-		log.Printf("[DEBUG] Storage Account %q not found, removing table %q from state", id.AccountName, id.Name)
+		log.Printf("[DEBUG] %s not found, removing from state", id)
 		d.SetId("")
 		return nil
 	}
 
-	acls, err := client.GetACLs(ctx, account.ResourceGroup, id.AccountName, id.Name)
+	acls, err := client.GetACLs(ctx, id.Name)
 	if err != nil {
-		return fmt.Errorf("retrieving ACL's %q in Storage Account %q: %s", id.Name, id.AccountName, err)
+		return fmt.Errorf("retrieving ACLs for %s: %v", id, err)
 	}
 
 	d.Set("name", id.Name)
 	d.Set("storage_account_name", id.AccountName)
 
-	if err := d.Set("acl", flattenStorageTableACLs(acls)); err != nil {
-		return fmt.Errorf("flattening `acl`: %+v", err)
+	if err = d.Set("acl", flattenStorageTableACLs(acls)); err != nil {
+		return fmt.Errorf("setting `acl`: %v", err)
 	}
 
 	return nil
@@ -200,27 +201,26 @@ func resourceStorageTableDelete(d *pluginsdk.ResourceData, meta interface{}) err
 	ctx, cancel := timeouts.ForDelete(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	id, err := parse.StorageTableDataPlaneID(d.Id())
+	id, err := parse.StorageTableDataPlaneID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
 	account, err := storageClient.FindAccount(ctx, id.AccountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Table %q: %s", id.AccountName, id.Name, err)
+		return fmt.Errorf("retrieving Storage Account %q for Table %q: %v", id.AccountName, id.Name, err)
 	}
 	if account == nil {
-		return fmt.Errorf("Unable to locate Storage Account %q!", id.AccountName)
+		return fmt.Errorf("locating Storage Account %q", id.AccountName)
 	}
 
-	client, err := storageClient.TablesClient(ctx, *account)
+	client, err := storageClient.TablesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
-		return fmt.Errorf("building Table Client: %s", err)
+		return fmt.Errorf("building Tables Client: %v", err)
 	}
 
-	log.Printf("[INFO] Deleting Table %q in Storage Account %q", id.Name, id.AccountName)
-	if err := client.Delete(ctx, account.ResourceGroup, id.AccountName, id.Name); err != nil {
-		return fmt.Errorf("deleting Table %q from Storage Account %q: %s", id.Name, id.AccountName, err)
+	if err = client.Delete(ctx, id.Name); err != nil {
+		return fmt.Errorf("deleting %s: %v", id, err)
 	}
 
 	return nil
@@ -231,35 +231,35 @@ func resourceStorageTableUpdate(d *pluginsdk.ResourceData, meta interface{}) err
 	ctx, cancel := timeouts.ForUpdate(meta.(*clients.Client).StopContext, d)
 	defer cancel()
 
-	id, err := parse.StorageTableDataPlaneID(d.Id())
+	id, err := parse.StorageTableDataPlaneID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
 	account, err := storageClient.FindAccount(ctx, id.AccountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Table %q: %s", id.AccountName, id.Name, err)
+		return fmt.Errorf("retrieving Storage Account %q for Table %q: %v", id.AccountName, id.Name, err)
 	}
 	if account == nil {
-		return fmt.Errorf("unable to locate Storage Account %q!", id.AccountName)
+		return fmt.Errorf("locating Storage Account %q", id.AccountName)
 	}
 
-	client, err := storageClient.TablesClient(ctx, *account)
+	client, err := storageClient.TablesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
-		return fmt.Errorf("building Table Client: %s", err)
+		return fmt.Errorf("building Table Client: %v", err)
 	}
 
 	if d.HasChange("acl") {
-		log.Printf("[DEBUG] Updating the ACL's for Storage Table %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updating ACLs for %s", id)
 
 		aclsRaw := d.Get("acl").(*pluginsdk.Set).List()
 		acls := expandStorageTableACLs(aclsRaw)
 
-		if err := client.UpdateACLs(ctx, account.ResourceGroup, id.AccountName, id.Name, acls); err != nil {
-			return fmt.Errorf("updating ACL's for Table %q (Storage Account %q): %s", id.Name, id.AccountName, err)
+		if err = client.UpdateACLs(ctx, id.Name, acls); err != nil {
+			return fmt.Errorf("updating ACLs for %s: %v", id, err)
 		}
 
-		log.Printf("[DEBUG] Updated the ACL's for Storage Table %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updated ACLs for %s", id)
 	}
 
 	return resourceStorageTableRead(d, meta)

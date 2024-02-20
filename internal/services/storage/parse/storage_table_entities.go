@@ -37,14 +37,14 @@ func (id StorageTableEntitiesId) ID() string {
 	return fmt.Sprintf("https://%s.table.%s/%s(%s)", id.AccountName, id.DomainSuffix, id.TableName, id.Filter)
 }
 
-func NewStorageTableEntitiesId(accountName, domainSuffix, tablename, filter string) StorageTableEntitiesId {
+func NewStorageTableEntitiesId(accountName, domainSuffix, tableName, filter string) StorageTableEntitiesId {
 	s := utils.Base64EncodeIfNot(filter)
 	sha := sha1.Sum([]byte(s))
 	filterHash := hex.EncodeToString(sha[:])
 	return StorageTableEntitiesId{
 		AccountName:  accountName,
 		DomainSuffix: domainSuffix,
-		TableName:    tablename,
+		TableName:    tableName,
 		Filter:       filterHash,
 	}
 }

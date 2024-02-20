@@ -69,34 +69,35 @@ func dataSourceStorageContainerRead(d *pluginsdk.ResourceData, meta interface{})
 
 	account, err := storageClient.FindAccount(ctx, accountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Container %q: %s", accountName, containerName, err)
+		return fmt.Errorf("retrieving Storage Account %q for Container %q: %v", accountName, containerName, err)
 	}
 	if account == nil {
-		return fmt.Errorf("Unable to locate Account %q for Storage Container %q", accountName, containerName)
+		return fmt.Errorf("locating Storage Account %q for Container %q", accountName, containerName)
 	}
 
-	client, err := storageClient.ContainersClient(ctx, *account)
+	client, err := storageClient.ContainersDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
-		return fmt.Errorf("building Containers Client for Storage Account %q (Resource Group %q): %s", accountName, account.ResourceGroup, err)
+		return fmt.Errorf("building Containers Client: %v", err)
 	}
 
-	id := parse.NewStorageContainerDataPlaneId(accountName, storageClient.Environment.StorageEndpointSuffix, containerName).ID()
-	d.SetId(id)
+	id := parse.NewStorageContainerDataPlaneId(accountName, storageClient.AzureEnvironment.StorageEndpointSuffix, containerName)
 
-	props, err := client.Get(ctx, account.ResourceGroup, accountName, containerName)
+	props, err := client.Get(ctx, containerName)
 	if err != nil {
-		return fmt.Errorf("retrieving Container %q (Account %q / Resource Group %q): %s", containerName, accountName, account.ResourceGroup, err)
+		return fmt.Errorf("retrieving %s: %v", id, err)
 	}
 	if props == nil {
-		return fmt.Errorf("Container %q was not found in Account %q / Resource Group %q", containerName, accountName, account.ResourceGroup)
+		return fmt.Errorf("retrieving %s: result was nil", id)
 	}
+
+	d.SetId(id.ID())
 
 	d.Set("name", containerName)
 	d.Set("storage_account_name", accountName)
 	d.Set("container_access_type", flattenStorageContainerAccessLevel(props.AccessLevel))
 
-	if err := d.Set("metadata", FlattenMetaData(props.MetaData)); err != nil {
-		return fmt.Errorf("setting `metadata`: %+v", err)
+	if err = d.Set("metadata", FlattenMetaData(props.MetaData)); err != nil {
+		return fmt.Errorf("setting `metadata`: %v", err)
 	}
 
 	d.Set("has_immutability_policy", props.HasImmutabilityPolicy)

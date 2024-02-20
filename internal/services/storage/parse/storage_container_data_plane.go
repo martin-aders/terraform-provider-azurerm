@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/resourceids"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/blob/containers"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/blob/containers"
 )
 
 var _ resourceids.Id = StorageContainerDataPlaneId{}
@@ -41,8 +41,8 @@ func NewStorageContainerDataPlaneId(accountName, domainSuffix, name string) Stor
 	}
 }
 
-func StorageContainerDataPlaneID(id string) (*StorageContainerDataPlaneId, error) {
-	parsed, err := containers.ParseResourceID(id)
+func StorageContainerDataPlaneID(id, domainSuffix string) (*StorageContainerDataPlaneId, error) {
+	parsed, err := containers.ParseContainerID(id, domainSuffix)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func StorageContainerDataPlaneID(id string) (*StorageContainerDataPlaneId, error
 	domainNameSuffix := strings.TrimPrefix(host, fmt.Sprintf("%s.blob.", hostSegments[0]))
 
 	return &StorageContainerDataPlaneId{
-		AccountName:  parsed.AccountName,
+		AccountName:  parsed.AccountId.AccountName,
 		DomainSuffix: domainNameSuffix,
 		Name:         parsed.ContainerName,
 	}, nil

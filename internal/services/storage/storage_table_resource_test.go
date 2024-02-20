@@ -83,7 +83,7 @@ func TestAccStorageTable_acl(t *testing.T) {
 }
 
 func (r StorageTableResource) Exists(ctx context.Context, client *clients.Client, state *pluginsdk.InstanceState) (*bool, error) {
-	id, err := parse.StorageTableDataPlaneID(state.ID)
+	id, err := parse.StorageTableDataPlaneID(state.ID, client.Storage.StorageDomainSuffix)
 	if err != nil {
 		return nil, err
 	}
@@ -94,16 +94,16 @@ func (r StorageTableResource) Exists(ctx context.Context, client *clients.Client
 	if account == nil {
 		return nil, fmt.Errorf("unable to determine Resource Group for Storage Storage Table %q (Account %q)", id.Name, id.AccountName)
 	}
-	tablesClient, err := client.Storage.TablesClient(ctx, *account)
+	tablesClient, err := client.Storage.TablesDataPlaneClient(ctx, *account, client.Storage.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
 		return nil, fmt.Errorf("building Table Client: %+v", err)
 	}
 
-	return tablesClient.Exists(ctx, account.ResourceGroup, id.AccountName, id.Name)
+	return tablesClient.Exists(ctx, id.Name)
 }
 
 func (r StorageTableResource) Destroy(ctx context.Context, client *clients.Client, state *pluginsdk.InstanceState) (*bool, error) {
-	id, err := parse.StorageTableDataPlaneID(state.ID)
+	id, err := parse.StorageTableDataPlaneID(state.ID, client.Storage.StorageDomainSuffix)
 	if err != nil {
 		return nil, err
 	}
@@ -114,19 +114,19 @@ func (r StorageTableResource) Destroy(ctx context.Context, client *clients.Clien
 	if account == nil {
 		return nil, fmt.Errorf("unable to determine Resource Group for Storage Storage Table %q (Account %q)", id.Name, id.AccountName)
 	}
-	tablesClient, err := client.Storage.TablesClient(ctx, *account)
+	tablesClient, err := client.Storage.TablesDataPlaneClient(ctx, *account, client.Storage.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
 		return nil, fmt.Errorf("building Table Client: %+v", err)
 	}
 
-	exists, err := tablesClient.Exists(ctx, account.ResourceGroup, id.AccountName, id.Name)
+	exists, err := tablesClient.Exists(ctx, id.Name)
 	if err != nil {
 		return nil, fmt.Errorf("retrieving Table %q (Account %q): %+v", id.Name, id.AccountName, err)
 	}
 	if exists == nil || !*exists {
 		return nil, fmt.Errorf("table %q doesn't exist in Account %q so it can't be deleted", id.Name, id.AccountName)
 	}
-	if err := tablesClient.Delete(ctx, account.ResourceGroup, id.AccountName, id.Name); err != nil {
+	if err := tablesClient.Delete(ctx, id.Name); err != nil {
 		return nil, fmt.Errorf("deleting Table %q (Account %q): %+v", id.Name, id.AccountName, err)
 	}
 	return utils.Bool(true), nil

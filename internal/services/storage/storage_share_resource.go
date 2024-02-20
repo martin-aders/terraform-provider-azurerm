@@ -11,13 +11,14 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2021-09-01/storage" // nolint: staticcheck
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/tf"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/clients"
+	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/helpers"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/migration"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/parse"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/validate"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/pluginsdk"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/validation"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/timeouts"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/file/shares"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/file/shares"
 )
 
 func resourceStorageShare() *pluginsdk.Resource {
@@ -27,8 +28,8 @@ func resourceStorageShare() *pluginsdk.Resource {
 		Update: resourceStorageShareUpdate,
 		Delete: resourceStorageShareDelete,
 
-		Importer: pluginsdk.ImporterValidatingResourceId(func(id string) error {
-			_, err := parse.StorageShareDataPlaneID(id)
+		Importer: helpers.ImporterValidatingStorageResourceId(func(id, storageDomainSuffix string) error {
+			_, err := parse.StorageShareDataPlaneID(id, storageDomainSuffix)
 			return err
 		}),
 
@@ -158,11 +159,13 @@ func resourceStorageShareCreate(d *pluginsdk.ResourceData, meta interface{}) err
 
 	account, err := storageClient.FindAccount(ctx, accountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Share %q: %s", accountName, shareName, err)
+		return fmt.Errorf("retrieving Account %q for Share %q: %v", accountName, shareName, err)
 	}
 	if account == nil {
-		return fmt.Errorf("Unable to locate Storage Account %q!", accountName)
+		return fmt.Errorf("locating Storage Account %q", accountName)
 	}
+
+	id := parse.NewStorageShareDataPlaneId(accountName, storageClient.StorageDomainSuffix, shareName)
 
 	protocol := shares.ShareProtocol(d.Get("enabled_protocol").(string))
 	if protocol == shares.NFS {
@@ -173,19 +176,18 @@ func resourceStorageShareCreate(d *pluginsdk.ResourceData, meta interface{}) err
 		}
 	}
 
-	client, err := storageClient.FileSharesClient(ctx, *account)
+	// The files API does not support bearer tokens (@manicminer, 2024-02-15)
+	client, err := storageClient.FileSharesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingOnlySharedKeyAuth())
 	if err != nil {
-		return fmt.Errorf("building File Share Client: %s", err)
+		return fmt.Errorf("building File Share Client: %v", err)
 	}
 
-	id := parse.NewStorageShareDataPlaneId(accountName, storageClient.Environment.StorageEndpointSuffix, shareName).ID()
-
-	exists, err := client.Exists(ctx, account.ResourceGroup, accountName, shareName)
+	exists, err := client.Exists(ctx, shareName)
 	if err != nil {
-		return fmt.Errorf("checking for existence of existing Storage Share %q (Account %q / Resource Group %q): %+v", shareName, accountName, account.ResourceGroup, err)
+		return fmt.Errorf("checking for existing %s: %v", id, err)
 	}
 	if exists != nil && *exists {
-		return tf.ImportAsExistsError("azurerm_storage_share", id)
+		return tf.ImportAsExistsError("azurerm_storage_share", id.ID())
 	}
 
 	log.Printf("[INFO] Creating Share %q in Storage Account %q", shareName, accountName)
@@ -200,13 +202,14 @@ func resourceStorageShareCreate(d *pluginsdk.ResourceData, meta interface{}) err
 		input.AccessTier = &tier
 	}
 
-	if err := client.Create(ctx, account.ResourceGroup, accountName, shareName, input); err != nil {
-		return fmt.Errorf("creating Share %q (Account %q / Resource Group %q): %+v", shareName, accountName, account.ResourceGroup, err)
+	if err = client.Create(ctx, shareName, input); err != nil {
+		return fmt.Errorf("creating %s: %v", id, err)
 	}
 
-	d.SetId(id)
-	if err := client.UpdateACLs(ctx, account.ResourceGroup, accountName, shareName, acls); err != nil {
-		return fmt.Errorf("setting ACL's for Share %q (Account %q / Resource Group %q): %+v", shareName, accountName, account.ResourceGroup, err)
+	d.SetId(id.ID())
+
+	if err = client.UpdateACLs(ctx, shareName, shares.SetAclInput{SignedIdentifiers: acls}); err != nil {
+		return fmt.Errorf("setting ACLs for %s: %v", id, err)
 	}
 
 	return resourceStorageShareRead(d, meta)
@@ -217,14 +220,14 @@ func resourceStorageShareRead(d *pluginsdk.ResourceData, meta interface{}) error
 	defer cancel()
 	storageClient := meta.(*clients.Client).Storage
 
-	id, err := parse.StorageShareDataPlaneID(d.Id())
+	id, err := parse.StorageShareDataPlaneID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
 	account, err := storageClient.FindAccount(ctx, id.AccountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Share %q: %s", id.AccountName, id.Name, err)
+		return fmt.Errorf("retrieving Account %q for Share %q: %v", id.AccountName, id.Name, err)
 	}
 	if account == nil {
 		log.Printf("[WARN] Unable to determine Account %q for Storage Share %q - assuming removed & removing from state", id.AccountName, id.Name)
@@ -232,12 +235,13 @@ func resourceStorageShareRead(d *pluginsdk.ResourceData, meta interface{}) error
 		return nil
 	}
 
-	client, err := storageClient.FileSharesClient(ctx, *account)
+	// The files API does not support bearer tokens (@manicminer, 2024-02-15)
+	client, err := storageClient.FileSharesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingOnlySharedKeyAuth())
 	if err != nil {
-		return fmt.Errorf("building File Share Client for Storage Account %q (Resource Group %q): %s", id.AccountName, account.ResourceGroup, err)
+		return fmt.Errorf("building File Share Client for Storage Account %q (Resource Group %q): %v", id.AccountName, account.ResourceGroup, err)
 	}
 
-	props, err := client.Get(ctx, account.ResourceGroup, id.AccountName, id.Name)
+	props, err := client.Get(ctx, id.Name)
 	if err != nil {
 		return err
 	}
@@ -278,70 +282,71 @@ func resourceStorageShareUpdate(d *pluginsdk.ResourceData, meta interface{}) err
 	defer cancel()
 	storageClient := meta.(*clients.Client).Storage
 
-	id, err := parse.StorageShareDataPlaneID(d.Id())
+	id, err := parse.StorageShareDataPlaneID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
 	account, err := storageClient.FindAccount(ctx, id.AccountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Share %q: %s", id.AccountName, id.Name, err)
+		return fmt.Errorf("retrieving Account %q for Share %q: %v", id.AccountName, id.Name, err)
 	}
 	if account == nil {
-		return fmt.Errorf("Unable to locate Storage Account %q!", id.AccountName)
+		return fmt.Errorf("locating Storage Account %q", id.AccountName)
 	}
 
-	client, err := storageClient.FileSharesClient(ctx, *account)
+	// The files API does not support bearer tokens (@manicminer, 2024-02-15)
+	client, err := storageClient.FileSharesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingOnlySharedKeyAuth())
 	if err != nil {
-		return fmt.Errorf("building File Share Client for Storage Account %q (Resource Group %q): %s", id.AccountName, account.ResourceGroup, err)
+		return fmt.Errorf("building File Share Client for Storage Account %q (Resource Group %q): %v", id.AccountName, account.ResourceGroup, err)
 	}
 
 	if d.HasChange("quota") {
-		log.Printf("[DEBUG] Updating the Quota for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updating the Quota for %s", id)
 		quota := d.Get("quota").(int)
 
-		if err := client.UpdateQuota(ctx, account.ResourceGroup, id.AccountName, id.Name, quota); err != nil {
-			return fmt.Errorf("updating Quota for File Share %q (Storage Account %q): %s", id.Name, id.AccountName, err)
+		if err = client.UpdateQuota(ctx, id.Name, quota); err != nil {
+			return fmt.Errorf("updating Quota for %s: %v", id, err)
 		}
 
-		log.Printf("[DEBUG] Updated the Quota for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updated the Quota for %s", id)
 	}
 
 	if d.HasChange("metadata") {
-		log.Printf("[DEBUG] Updating the MetaData for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updating the MetaData for %s", id)
 
 		metaDataRaw := d.Get("metadata").(map[string]interface{})
 		metaData := ExpandMetaData(metaDataRaw)
 
-		if err := client.UpdateMetaData(ctx, account.ResourceGroup, id.AccountName, id.Name, metaData); err != nil {
-			return fmt.Errorf("updating MetaData for File Share %q (Storage Account %q): %s", id.Name, id.AccountName, err)
+		if err = client.UpdateMetaData(ctx, id.Name, metaData); err != nil {
+			return fmt.Errorf("updating MetaData for %s: %v", id, err)
 		}
 
-		log.Printf("[DEBUG] Updated the MetaData for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updated the MetaData for %s", id)
 	}
 
 	if d.HasChange("acl") {
-		log.Printf("[DEBUG] Updating the ACL's for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updating the ACLs for %s", id)
 
 		aclsRaw := d.Get("acl").(*pluginsdk.Set).List()
 		acls := expandStorageShareACLs(aclsRaw)
 
-		if err := client.UpdateACLs(ctx, account.ResourceGroup, id.AccountName, id.Name, acls); err != nil {
-			return fmt.Errorf("updating ACL's for File Share %q (Storage Account %q): %s", id.Name, id.AccountName, err)
+		if err = client.UpdateACLs(ctx, id.Name, shares.SetAclInput{SignedIdentifiers: acls}); err != nil {
+			return fmt.Errorf("updating ACLs for %s: %v", id, err)
 		}
 
-		log.Printf("[DEBUG] Updated the ACL's for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updated ACLs for %s", id)
 	}
 
 	if d.HasChange("access_tier") {
-		log.Printf("[DEBUG] Updating the Access Tier for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updating Access Tier for %s", id)
 
 		tier := shares.AccessTier(d.Get("access_tier").(string))
-		if err := client.UpdateTier(ctx, account.ResourceGroup, id.AccountName, id.Name, tier); err != nil {
-			return fmt.Errorf("updating Access Tier for File Share %q (Storage Account %q): %s", id.Name, id.AccountName, err)
+		if err = client.UpdateTier(ctx, id.Name, tier); err != nil {
+			return fmt.Errorf("updating Access Tier for %s: %v", id, err)
 		}
 
-		log.Printf("[DEBUG] Updated the Access Tier for File Share %q (Storage Account %q)", id.Name, id.AccountName)
+		log.Printf("[DEBUG] Updated Access Tier for %s", id)
 	}
 
 	return resourceStorageShareRead(d, meta)
@@ -352,26 +357,27 @@ func resourceStorageShareDelete(d *pluginsdk.ResourceData, meta interface{}) err
 	defer cancel()
 	storageClient := meta.(*clients.Client).Storage
 
-	id, err := parse.StorageShareDataPlaneID(d.Id())
+	id, err := parse.StorageShareDataPlaneID(d.Id(), storageClient.StorageDomainSuffix)
 	if err != nil {
 		return err
 	}
 
 	account, err := storageClient.FindAccount(ctx, id.AccountName)
 	if err != nil {
-		return fmt.Errorf("retrieving Account %q for Share %q: %s", id.AccountName, id.Name, err)
+		return fmt.Errorf("retrieving Account %q for Share %q: %v", id.AccountName, id.Name, err)
 	}
 	if account == nil {
-		return fmt.Errorf("unable to locate Storage Account %q!", id.AccountName)
+		return fmt.Errorf("locating Storage Account %q", id.AccountName)
 	}
 
-	client, err := storageClient.FileSharesClient(ctx, *account)
+	// The files API does not support bearer tokens (@manicminer, 2024-02-15)
+	client, err := storageClient.FileSharesDataPlaneClient(ctx, *account, storageClient.DataPlaneOperationSupportingOnlySharedKeyAuth())
 	if err != nil {
-		return fmt.Errorf("building File Share Client for Storage Account %q (Resource Group %q): %s", id.AccountName, account.ResourceGroup, err)
+		return fmt.Errorf("building File Share Client for Storage Account %q (Resource Group %q): %v", id.AccountName, account.ResourceGroup, err)
 	}
 
-	if err := client.Delete(ctx, account.ResourceGroup, id.AccountName, id.Name); err != nil {
-		return fmt.Errorf("deleting File Share %q (Storage Account %q / Resource Group %q): %s", id.Name, id.AccountName, account.ResourceGroup, err)
+	if err = client.Delete(ctx, id.Name); err != nil {
+		return fmt.Errorf("deleting %s: %v", id, err)
 	}
 
 	return nil

@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/hashicorp/go-azure-helpers/lang/response"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/acceptance"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/acceptance/check"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/clients"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/pluginsdk"
 	"github.com/hashicorp/terraform-provider-azurerm/utils"
-	"github.com/tombuildsstuff/giovanni/storage/2020-08-04/table/entities"
+	"github.com/tombuildsstuff/giovanni/storage/2023-11-03/table/entities"
 )
 
 type StorageTableEntityResource struct{}
@@ -116,19 +117,19 @@ func TestAccTableEntity_update_typed(t *testing.T) {
 }
 
 func (r StorageTableEntityResource) Exists(ctx context.Context, client *clients.Client, state *pluginsdk.InstanceState) (*bool, error) {
-	id, err := entities.ParseResourceID(state.ID)
+	id, err := entities.ParseEntityID(state.ID, client.Storage.StorageDomainSuffix)
 	if err != nil {
 		return nil, err
 	}
-	account, err := client.Storage.FindAccount(ctx, id.AccountName)
+	account, err := client.Storage.FindAccount(ctx, id.AccountId.AccountName)
 	if err != nil {
-		return nil, fmt.Errorf("retrieving Account %q for Table %q: %+v", id.AccountName, id.TableName, err)
+		return nil, fmt.Errorf("retrieving Account %q for Table %q: %+v", id.AccountId.AccountName, id.TableName, err)
 	}
 	if account == nil {
-		return nil, fmt.Errorf("storage Account %q was not found", id.AccountName)
+		return nil, fmt.Errorf("storage Account %q was not found", id.AccountId.AccountName)
 	}
 
-	entitiesClient, err := client.Storage.TableEntityClient(ctx, *account)
+	entitiesClient, err := client.Storage.TableEntityDataPlaneClient(ctx, *account, client.Storage.DataPlaneOperationSupportingAnyAuthMethod())
 	if err != nil {
 		return nil, fmt.Errorf("building Table Entity Client: %+v", err)
 	}
@@ -138,12 +139,12 @@ func (r StorageTableEntityResource) Exists(ctx context.Context, client *clients.
 		RowKey:        id.RowKey,
 		MetaDataLevel: entities.NoMetaData,
 	}
-	resp, err := entitiesClient.Get(ctx, id.AccountName, id.TableName, input)
+	resp, err := entitiesClient.Get(ctx, id.TableName, input)
 	if err != nil {
-		if utils.ResponseWasNotFound(resp.Response) {
+		if response.WasNotFound(resp.HttpResponse) {
 			return utils.Bool(false), nil
 		}
-		return nil, fmt.Errorf("retrieving Entity (Partition Key %q / Row Key %q) (Table %q / Storage Account %q / Resource Group %q): %+v", id.PartitionKey, id.RowKey, id.TableName, id.AccountName, account.ResourceGroup, err)
+		return nil, fmt.Errorf("retrieving Entity (Partition Key %q / Row Key %q) (Table %q / Storage Account %q / Resource Group %q): %+v", id.PartitionKey, id.RowKey, id.TableName, id.AccountId.AccountName, account.ResourceGroup, err)
 	}
 	return utils.Bool(true), nil
 }

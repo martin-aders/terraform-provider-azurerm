@@ -8,6 +8,7 @@ import (
 	"regexp"
 
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/storage/parse"
+	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/pluginsdk"
 )
 
 func StorageContainerName(v interface{}, k string) (warnings []string, errors []error) {
@@ -29,16 +30,18 @@ func StorageContainerName(v interface{}, k string) (warnings []string, errors []
 	return warnings, errors
 }
 
-func StorageContainerDataPlaneID(input interface{}, key string) (warnings []string, errors []error) {
-	v, ok := input.(string)
-	if !ok {
-		errors = append(errors, fmt.Errorf("expected %q to be a string", key))
+func StorageContainerDataPlaneIDForDomainSuffix(domainSuffix string) pluginsdk.SchemaValidateFunc {
+	return func(input interface{}, key string) (warnings []string, errors []error) {
+		v, ok := input.(string)
+		if !ok {
+			errors = append(errors, fmt.Errorf("expected %q to be a string", key))
+			return
+		}
+
+		if _, err := parse.StorageContainerDataPlaneID(v, domainSuffix); err != nil {
+			errors = append(errors, err)
+		}
+
 		return
 	}
-
-	if _, err := parse.StorageContainerDataPlaneID(v); err != nil {
-		errors = append(errors, err)
-	}
-
-	return
 }
